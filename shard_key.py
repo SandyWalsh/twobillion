@@ -1,5 +1,6 @@
 # This program attempts a variety of different Shard Key strategies to see what
 # gives the best mix of distribution, write speed and queryability.
+import datetime
 import random
 import uuid as uuidlib
 
@@ -12,24 +13,30 @@ def temporal_key():
     pass
 
 
-def _event(req, node, event, uuid):
+def pkg(*args):
+    new = {}
+    for a in args:
+        new.update(a)
+    return new
+
+
+def _event(base, node, event, uuid):
     results = []
+    extra = {'node': node, 'uuid': uuid}
     if event[-1] == '*':
         event = event[0:-1]
         for e in ['start', 'end']:
-            results.append({'request_id': req, 'node': node,
-                            'event': event + e, 'uuid': uuid})
+            results.append(pkg(base, extra, {'event': event + e}))
     else:
-        results.append({'request_id': req, 'node': node,
-                        'event': event, 'uuid': uuid})
+        results.append(pkg(base, extra, {'event': event}))
     return results
 
 
-def mk_event(req, nodes, events, uuid):
-    return _event(req, random.choice(nodes), random.choice(events), uuid)
+def mk_event(base, nodes, events, uuid):
+    return _event(base, random.choice(nodes), random.choice(events), uuid)
 
 
-def make_action(request_id, instances, collection, shard_key_function):
+def make_action(base, instances, collection, shard_key_function):
     """Start creating records that look like OpenStack events.
 
     api [-> scheduler] -> compute node.
@@ -51,17 +58,16 @@ def make_action(request_id, instances, collection, shard_key_function):
     if not is_create:
         uuid = random.choice(instances.keys())
 
-    api = mk_event(request_id, fixtures.api_nodes,
-                   ['compute.instance.update'], uuid)
+    api = mk_event(base, fixtures.api_nodes, ['compute.instance.update'], uuid)
     event_chain.extend(api)
 
     if is_create:
         scheduler_node = random.choice(fixtures.schedulers)
         for e in fixtures.scheduler_events:
-            event_chain.extend(_event(request_id, scheduler_node, e, uuid))
+            event_chain.extend(_event(base, scheduler_node, e, uuid))
 
         compute_node = random.choice(fixtures.compute_nodes)
-        event_chain.extend(_event(request_id, compute_node,
+        event_chain.extend(_event(base, compute_node,
                                   'compute.instance.create.*', uuid))
 
         instances[uuid] = compute_node
@@ -69,12 +75,12 @@ def make_action(request_id, instances, collection, shard_key_function):
         compute_node = instances[uuid]
         is_delete = random.randrange(100) < 10
         if is_delete:
-            event_chain.extend(_event(request_id, compute_node,
+            event_chain.extend(_event(base, compute_node,
                                       'compute.instance.delete.*', uuid))
             del instances[uuid]
         else:
             event = random.choice(fixtures.compute_events)
-            event_chain.extend(_event(request_id, compute_node, event, uuid))
+            event_chain.extend(_event(base, compute_node, event, uuid))
     return event_chain
 
 
@@ -89,6 +95,7 @@ if __name__=='__main__':
     instances = {}  # { uuid: compute_node }
 
     request_id = "req_" + str(uuidlib.uuid4())
-    action = make_action(request_id, instances, collection, temporal_key)
+    base = {'request_id': request_id, 'when': datetime.datetime.utcnow()}
+    action = make_action(base, instances, collection, temporal_key)
     for e in action:
         print e
