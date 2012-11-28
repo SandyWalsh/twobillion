@@ -1,6 +1,4 @@
 compute_events = [
-    'compute.instance.create.*',
-    'compute.instance.delete.*',
     'compute.instance.finish_resize.*',
     'compute.instance.power_off.*',
     'compute.instance.power_on.*',
@@ -38,10 +36,9 @@ compute_events = [
     'terminate_instance',
     'unrescue_instance']
 
-scheduler_events = [
-    'scheduler.run_instance',
-    'scheduler.run_instance.scheduled',
-    'scheduler.run_instance.*'],
+scheduler_events = ['scheduler.run_instance.start',
+                    'scheduler.run_instance.scheduled',
+                    'scheduler.run_instance.end']
 
 schedulers = ['scheduler_%02d' % x for x in xrange(3)]
 
