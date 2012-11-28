@@ -75,12 +75,12 @@ def make_action(now, base, instances, collection):
         now = bump_time(now, 0.5, 3.0)  # From api to scheduler
         scheduler_node = random.choice(fixtures.schedulers)
         for e in fixtures.scheduler_events:
-            event_chain.extend(_event(now, base, scheduler_node, e))
+            event_chain.extend(_event(now, nbase, scheduler_node, e))
             now = bump_time(now, 0.1, 0.5)  # inside scheduler
 
         compute_node = random.choice(fixtures.compute_nodes)
         now = bump_time(now, 0.5, 3.0)  # In Compute node
-        event_chain.extend(_event(now, base, compute_node,
+        event_chain.extend(_event(now, nbase, compute_node,
                                   'compute.instance.create.*'))
 
         instances[uuid] = compute_node
@@ -88,12 +88,12 @@ def make_action(now, base, instances, collection):
         compute_node = instances[uuid]
         is_delete = random.randrange(100) < 10
         if is_delete:
-            event_chain.extend(_event(base, compute_node,
+            event_chain.extend(_event(now, nbase, compute_node,
                                       'compute.instance.delete.*', uuid))
             del instances[uuid]
         else:
             event = random.choice(fixtures.compute_events)
-            event_chain.extend(_event(base, compute_node, event, uuid))
+            event_chain.extend(_event(now, nbase, compute_node, event, uuid))
     return event_chain
 
 
@@ -135,13 +135,20 @@ if __name__=='__main__':
     now = datetime.datetime.utcnow()
     actions = []  # active actions
     next_events = []  # priority queue
+    instances_in_use = set()
 
     action = get_action(now)
     ends_at = None
     for idx, event in enumerate(action):
         ends_at = event['when']
-        heapq.heappush(next_events, (ends_at, event, idx==len(action)-1))
+        heapq.heappush(next_events, (ends_at, event, idx==0, idx==len(action)-1))
 
     while next_events:
-        when, event, last = heapq.heappop(next_events)
-        print when, event['event'], last
+        when, event, start, end = heapq.heappop(next_events)
+        if start or end:
+            uuid = event['uuid']
+            if start:
+                instances_in_use.add(uuid)
+            else:
+                instances_in_use.remove(uuid)
+        print when, event['event'], start, end
