@@ -1,16 +1,13 @@
 # This program attempts a variety of different Shard Key strategies to see what
 # gives the best mix of distribution, write speed and queryability.
 import datetime
+import heapq
 import random
 import uuid as uuidlib
 
 import pymongo
 
 import fixtures
-
-
-def temporal_key():
-    pass
 
 
 def pkg(*args):
@@ -20,23 +17,33 @@ def pkg(*args):
     return new
 
 
-def _event(base, node, event, uuid):
+def bump_time(now, low, high):
+    """Create a random time in fractional seconds and move now ahead
+    that amount."""
+    secs = low + ((high - low) * random.random())
+    return now + datetime.timedelta(seconds=secs)
+
+
+def _event(now, base, node, event):
     results = []
-    extra = {'node': node, 'uuid': uuid}
     if event[-1] == '*':
         event = event[0:-1]
-        for e in ['start', 'end']:
-            results.append(pkg(base, extra, {'event': event + e}))
+        extra = {'when': now, 'node': node}
+        results.append(pkg(base, extra, {'event': event + "start"}))
+        now = bump_time(now, 0.25, 60.0 * 15.0)  # In compute node
+        extra = {'when': now, 'node': node}
+        results.append(pkg(base, extra, {'event': event + "end"}))
     else:
+        extra = {'when': now, 'node': node}
         results.append(pkg(base, extra, {'event': event}))
     return results
 
 
-def mk_event(base, nodes, events, uuid):
-    return _event(base, random.choice(nodes), random.choice(events), uuid)
+def mk_event(now, base, nodes, events):
+    return _event(now, base, random.choice(nodes), random.choice(events))
 
 
-def make_action(base, instances, collection, shard_key_function):
+def make_action(now, base, instances, collection):
     """Start creating records that look like OpenStack events.
 
     api [-> scheduler] -> compute node.
@@ -58,17 +65,23 @@ def make_action(base, instances, collection, shard_key_function):
     if not is_create:
         uuid = random.choice(instances.keys())
 
-    api = mk_event(base, fixtures.api_nodes, ['compute.instance.update'], uuid)
+    nbase = {'uuid': uuid}
+    nbase.update(base)
+
+    api = mk_event(now, nbase, fixtures.api_nodes, ['compute.instance.update'])
     event_chain.extend(api)
 
     if is_create:
+        now = bump_time(now, 0.5, 3.0)  # From api to scheduler
         scheduler_node = random.choice(fixtures.schedulers)
         for e in fixtures.scheduler_events:
-            event_chain.extend(_event(base, scheduler_node, e, uuid))
+            event_chain.extend(_event(now, base, scheduler_node, e))
+            now = bump_time(now, 0.1, 0.5)  # inside scheduler
 
         compute_node = random.choice(fixtures.compute_nodes)
-        event_chain.extend(_event(base, compute_node,
-                                  'compute.instance.create.*', uuid))
+        now = bump_time(now, 0.5, 3.0)  # In Compute node
+        event_chain.extend(_event(now, base, compute_node,
+                                  'compute.instance.create.*'))
 
         instances[uuid] = compute_node
     else:
@@ -84,6 +97,13 @@ def make_action(base, instances, collection, shard_key_function):
     return event_chain
 
 
+def get_action(now):
+    request_id = "req_" + str(uuidlib.uuid4())
+    base = {'request_id': request_id}
+    action = make_action(now, base, instances, collection)
+    return action
+
+
 if __name__=='__main__':
     connection = pymongo.Connection("sandy-modgod-1", 27017)
     db = connection['scrap']
@@ -94,8 +114,34 @@ if __name__=='__main__':
     # Our first experiment is a purely temporal shard key.
     instances = {}  # { uuid: compute_node }
 
-    request_id = "req_" + str(uuidlib.uuid4())
-    base = {'request_id': request_id, 'when': datetime.datetime.utcnow()}
-    action = make_action(base, instances, collection, temporal_key)
-    for e in action:
-        print e
+
+    # Many actions can be performed concurrently.
+    # We might start working on instance #1 and then, while that
+    # effort is still underway, start doing something with instances
+    # #2, 3 and 4. They need to interleave each other.
+    #
+    # An "action", below, is a list of each of the steps necessary
+    # to perform that operation, but with a time component relative to
+    # the starting time passed in.
+    # It's our reponsability to fire off the events when sufficient "time"
+    # has passed.
+    #
+    # We don't operate in real-time. Time jumps ahead to the next task to
+    # be performed (so we don't have to do sleep()'s in this code).
+    #
+    # The thing we don't want to have to deal with is overlapping commands
+    # (like instance.delete starting while instance.create is still underway)
+    # That's too much headache.
+    now = datetime.datetime.utcnow()
+    actions = []  # active actions
+    next_events = []  # priority queue
+
+    action = get_action(now)
+    ends_at = None
+    for idx, event in enumerate(action):
+        ends_at = event['when']
+        heapq.heappush(next_events, (ends_at, event, idx==len(action)-1))
+
+    while next_events:
+        when, event, last = heapq.heappop(next_events)
+        print when, event['event'], last
