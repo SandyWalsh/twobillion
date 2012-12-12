@@ -4,6 +4,8 @@ import datetime
 import heapq
 import random
 import uuid as uuidlib
+import sys
+import time
 
 import pymongo
 
@@ -43,7 +45,7 @@ def mk_event(now, base, nodes, events):
     return _event(now, base, random.choice(nodes), random.choice(events))
 
 
-def make_action(now, base, instances, collection):
+def make_action(now, base, instances_in_use, instances, collection):
     """Start creating records that look like OpenStack events.
 
     api [-> scheduler] -> compute node.
@@ -54,20 +56,42 @@ def make_action(now, base, instances, collection):
     1 in 10 operations will delete an existing instance.
 
     In general, 1 in 10 operations will fail somewhere along the way.
+
+    instances_in_use is different than instances.keys():
+    instances.keys() is the list of all instances, even instances that
+    don't exist yet, but will be created in the near future.
+    instance_in_use are the instances in the current timeline.
     """
     event_chain = []
 
-    is_create = True
+    is_create = False
+    is_delete = False
+    is_update = False
+
+    uuid = str(uuidlib.uuid4())
+    compute_node = random.choice(fixtures.compute_nodes)
+
     if len(instances) > 10:
         is_create = random.randrange(100) < 10
 
-    uuid = str(uuidlib.uuid4())
-    if not is_create:
-        uuid = random.choice(instances.keys())
+    if not is_create and not instances_in_use:
+        is_create = True
 
-    nbase = {'uuid': uuid}
+    if not is_create:
+        uuid = random.choice(list(instances_in_use))
+        compute_node = instances[uuid]
+        is_delete = random.randrange(100) < 10
+        if not is_delete:
+            is_update = True
+
+    if not (is_create or is_delete or is_update):
+        return []
+
+    nbase = {'uuid': uuid, 'is_create': is_create, 'is_delete': is_delete,
+             'is_update': is_update}
     nbase.update(base)
 
+    # All operations start with an API call ...
     api = mk_event(now, nbase, fixtures.api_nodes, ['compute.instance.update'])
     event_chain.extend(api)
 
@@ -78,42 +102,40 @@ def make_action(now, base, instances, collection):
             event_chain.extend(_event(now, nbase, scheduler_node, e))
             now = bump_time(now, 0.1, 0.5)  # inside scheduler
 
-        compute_node = random.choice(fixtures.compute_nodes)
         now = bump_time(now, 0.5, 3.0)  # In Compute node
         event_chain.extend(_event(now, nbase, compute_node,
                                   'compute.instance.create.*'))
-
         instances[uuid] = compute_node
-    else:
-        compute_node = instances[uuid]
-        is_delete = random.randrange(100) < 10
+
+    if is_delete:
         if is_delete:
             event_chain.extend(_event(now, nbase, compute_node,
-                                      'compute.instance.delete.*', uuid))
+                                      'compute.instance.delete.*'))
             del instances[uuid]
-        else:
-            event = random.choice(fixtures.compute_events)
-            event_chain.extend(_event(now, nbase, compute_node, event, uuid))
+
+    if is_update:
+        event = random.choice(fixtures.compute_events)
+        event_chain.extend(_event(now, nbase, compute_node, event))
+
     return event_chain
 
 
-def get_action(now):
+def get_action(instances_in_use, instances, now):
     request_id = "req_" + str(uuidlib.uuid4())
     base = {'request_id': request_id}
-    action = make_action(now, base, instances, collection)
-    return action
+    return make_action(now, base, instances_in_use, instances, collection)
 
 
 if __name__=='__main__':
-    connection = pymongo.Connection("sandy-modgod-1", 27017)
+    connection = pymongo.MongoClient("sandy-mongos-1", 27017)
     db = connection['scrap']
+    db.drop_collection('raw')
 
     # Loosely simulate the RawData table in StackTach
     collection = db['raw']
 
     # Our first experiment is a purely temporal shard key.
     instances = {}  # { uuid: compute_node }
-
 
     # Many actions can be performed concurrently.
     # We might start working on instance #1 and then, while that
@@ -123,32 +145,56 @@ if __name__=='__main__':
     # An "action", below, is a list of each of the steps necessary
     # to perform that operation, but with a time component relative to
     # the starting time passed in.
-    # It's our reponsability to fire off the events when sufficient "time"
+    # It's our responsibility to fire off the events when sufficient "time"
     # has passed.
-    #
-    # We don't operate in real-time. Time jumps ahead to the next task to
-    # be performed (so we don't have to do sleep()'s in this code).
     #
     # The thing we don't want to have to deal with is overlapping commands
     # (like instance.delete starting while instance.create is still underway)
     # That's too much headache.
-    now = datetime.datetime.utcnow()
-    actions = []  # active actions
+
+    operations_per_minute = 60
+    operations_per_second = float(operations_per_minute) / 60.0
+    millisecond_per_tick = 1000.0 / float(operations_per_second)
     next_events = []  # priority queue
     instances_in_use = set()
 
-    action = get_action(now)
-    ends_at = None
-    for idx, event in enumerate(action):
-        ends_at = event['when']
-        heapq.heappush(next_events, (ends_at, event, idx==0, idx==len(action)-1))
+    now = datetime.datetime.utcnow()
+    tick = now + datetime.timedelta(milliseconds=millisecond_per_tick)
+    while True:
+        if now >= tick:
+            action = get_action(instances_in_use, instances, now)
+            for idx, event in enumerate(action):
+                when = event['when']
+                heapq.heappush(next_events,
+                                    (when, event, idx==0, idx==len(action)-1))
+            tick = now + datetime.timedelta(milliseconds=millisecond_per_tick)
 
-    while next_events:
-        when, event, start, end = heapq.heappop(next_events)
-        if start or end:
-            uuid = event['uuid']
-            if start:
-                instances_in_use.add(uuid)
-            else:
-                instances_in_use.remove(uuid)
-        print when, event['event'], start, end
+        if next_events:
+            when, event, start, end = next_events[0]  # peek
+            while when < now:
+                when, event, start, end = heapq.heappop(next_events)
+                uuid = event['uuid']
+                if end:
+                    if event['is_create']:
+                        instances_in_use.add(uuid)
+                    elif event['is_delete']:
+                        instances_in_use.remove(uuid)
+                print when, event['event'], uuid
+
+                #collection.insert(event)
+
+        time.sleep(.1)
+        now = datetime.datetime.utcnow()
+
+    if False:
+        read_start = datetime.datetime.utcnow()
+        c = 0
+        for r in collection.find().sort("when"):
+            # print r['when'], r['event'], r['node']
+            x = r['when']
+            y = r['event']
+            z = r['node']
+            c += 1
+        read_end = datetime.datetime.utcnow()
+
+        print c, write_end - write_start, read_end - read_start
