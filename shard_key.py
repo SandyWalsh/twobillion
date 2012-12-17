@@ -64,22 +64,24 @@ def make_action(now, base, instances_in_use, instances, collection):
     """
     event_chain = []
 
-    is_create = False
+    is_create = random.randrange(100) < 10
     is_delete = False
     is_update = False
 
     uuid = str(uuidlib.uuid4())
     compute_node = random.choice(fixtures.compute_nodes)
 
-    if len(instances) > 10:
-        is_create = random.randrange(100) < 10
-
     if not is_create and not instances_in_use:
         is_create = True
 
     if not is_create:
         uuid = random.choice(list(instances_in_use))
-        compute_node = instances[uuid]
+        try:
+            compute_node = instances[uuid]
+        except KeyError:
+            # The instance is in the process of being deleted.
+            print "KEY ERROR"
+            return []
         is_delete = random.randrange(100) < 10
         if not is_delete:
             is_update = True
@@ -161,9 +163,22 @@ if __name__=='__main__':
     now = datetime.datetime.utcnow()
     tick = now + datetime.timedelta(milliseconds=millisecond_per_tick)
     while True:
+        now = datetime.datetime.utcnow()
         if now >= tick:
             action = get_action(instances_in_use, instances, now)
             for idx, event in enumerate(action):
+                if idx == 0:
+                    uuid = event['uuid'][-4:]
+                    request = event['request_id'][-4:]
+                    print "-----", now.time(),
+                    if event['is_create']:
+                        print "CREATE:",
+                    if event['is_delete']:
+                        print "DELETE:",
+                    if event['is_update']:
+                        print "UPDATE:",
+                    print "U:%s R:%s" % (uuid, request),
+                    print "(%d of %d)" % (len(instances_in_use), len(instances))
                 when = event['when']
                 heapq.heappush(next_events,
                                     (when, event, idx==0, idx==len(action)-1))
@@ -171,20 +186,22 @@ if __name__=='__main__':
 
         if next_events:
             when, event, start, end = next_events[0]  # peek
-            while when < now:
+            while (when < now) and len(next_events):
                 when, event, start, end = heapq.heappop(next_events)
                 uuid = event['uuid']
+                request = event['request_id']
                 if end:
                     if event['is_create']:
                         instances_in_use.add(uuid)
                     elif event['is_delete']:
                         instances_in_use.remove(uuid)
-                print when, event['event'], uuid
-
+                print "(%3d) %15s %40s %4s %4s" % (
+                          len(next_events), when.time(),
+                          event['event'], uuid[-4:], request[-4:])
+            print "..."
                 #collection.insert(event)
 
         time.sleep(.1)
-        now = datetime.datetime.utcnow()
 
     if False:
         read_start = datetime.datetime.utcnow()
