@@ -80,7 +80,7 @@ def make_action(now, base, instances_in_use, instances, collection):
             compute_node = instances[uuid]
         except KeyError:
             # The instance is in the process of being deleted.
-            print "KEY ERROR"
+            print "* can't find", uuid
             return []
         is_delete = random.randrange(100) < 10
         if not is_delete:
@@ -184,23 +184,24 @@ if __name__=='__main__':
                                     (when, event, idx==0, idx==len(action)-1))
             tick = now + datetime.timedelta(milliseconds=millisecond_per_tick)
 
-        if next_events:
+        while True:
+            if not next_events:
+                break
             when, event, start, end = next_events[0]  # peek
-            while (when < now) and len(next_events):
-                when, event, start, end = heapq.heappop(next_events)
-                uuid = event['uuid']
-                request = event['request_id']
-                if end:
-                    if event['is_create']:
-                        instances_in_use.add(uuid)
-                    elif event['is_delete']:
-                        instances_in_use.remove(uuid)
-                print "(%3d) %15s %40s %4s %4s" % (
-                          len(next_events), when.time(),
-                          event['event'], uuid[-4:], request[-4:])
-            print "..."
-                #collection.insert(event)
-
+            if when > now:
+                break
+            when, event, start, end = heapq.heappop(next_events)
+            uuid = event['uuid']
+            request = event['request_id']
+            if end:
+                if event['is_create']:
+                    instances_in_use.add(uuid)
+                elif event['is_delete']:
+                    instances_in_use.remove(uuid)
+            print "(%3d) %15s %40s %4s %4s" % (
+                      len(next_events), when.time(),
+                      event['event'], uuid[-4:], request[-4:])
+            #collection.insert(event)
         time.sleep(.1)
 
     if False:
