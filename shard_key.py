@@ -82,7 +82,7 @@ def make_action(now, base, instances_in_use, instances, collection):
             # The instance is in the process of being deleted.
             print "* can't find", uuid
             return []
-        is_delete = random.randrange(100) < 10
+        is_delete = random.randrange(100) < 20
         if not is_delete:
             is_update = True
 
@@ -131,7 +131,7 @@ def get_action(instances_in_use, instances, now):
 if __name__=='__main__':
     connection = pymongo.MongoClient("sandy-mongos-1", 27017)
     db = connection['scrap']
-    db.drop_collection('raw')
+    #db.drop_collection('raw')
 
     # Loosely simulate the RawData table in StackTach
     collection = db['raw']
@@ -154,7 +154,7 @@ if __name__=='__main__':
     # (like instance.delete starting while instance.create is still underway)
     # That's too much headache.
 
-    operations_per_minute = 60
+    operations_per_minute = 6000
     operations_per_second = float(operations_per_minute) / 60.0
     millisecond_per_tick = 1000.0 / float(operations_per_second)
     next_events = []  # priority queue
@@ -201,8 +201,8 @@ if __name__=='__main__':
             print "(%3d) %15s %40s %4s %4s" % (
                       len(next_events), when.time(),
                       event['event'], uuid[-4:], request[-4:])
-            #collection.insert(event)
-        time.sleep(.1)
+            collection.insert(event)
+        time.sleep(.01)
 
     if False:
         read_start = datetime.datetime.utcnow()
