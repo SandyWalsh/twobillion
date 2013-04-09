@@ -8,7 +8,6 @@ import schema
 
 from sqlalchemy.sql import func
 
-
 session = schema.get_session()
 
 deploy = ['ord', 'lon', 'dfw']
@@ -68,34 +67,54 @@ compute_events = [
 publishers = ['pub_%d' % x for x in range(10)]
 routing_keys = ['route_%d' % x for x in range(10)]
 
-keys = [('deployment', deployments),
-        ('tenant', tenants),
-        ('routing_key', routing_keys),
-        ('state', states),
-        ('old_state', states),
-        ('task', tasks),
-        ('old_task', tasks),
-        ('image_type', image_types),
-        ('when', None),
-        ('publisher', publishers),
-        ('event', compute_events),
-        ('service', services),
-        ('host', hosts),
-        ('instance', ["ins-%s" % uuid.uuid4() for x in range(50)]),
-        ('request_id', [uuid.uuid4() for x in range(50)])]
+keys = [('deployment', deployments, schema.TEXT_TYPE),
+        ('tenant', tenants, schema.INT_TYPE),
+        ('routing_key', routing_keys, schema.TEXT_TYPE),
+        ('state', states, schema.TEXT_TYPE),
+        ('old_state', states, schema.TEXT_TYPE),
+        ('task', tasks, schema.TEXT_TYPE),
+        ('old_task', tasks, schema.TEXT_TYPE),
+        ('image_type', image_types, schema.INT_TYPE),
+        ('publisher', publishers, schema.TEXT_TYPE),
+        ('service', services, schema.TEXT_TYPE),
+        ('host', hosts, schema.TEXT_TYPE),
+        ('instance', ["ins-%s" % uuid.uuid4() for x in range(50)], schema.TEXT_TYPE),
+        ('request_id', [uuid.uuid4() for x in range(50)], schema.TEXT_TYPE)
+       ]
 
 
-def save(traits, data):
-    start = datetime.datetime.utcnow()
-    d = schema.RawData(data)
-    session.add(d)
+all_unique_names = {}
+
+
+def get_unique_name(name):
+    unique = all_unique_names.get(name)
+    if not unique:
+        unique = schema.UniqueName(name)
+        session.add(unique)
+        session.commit()
+        all_unique_names[name] = unique
+    return unique.id
+
+
+def save(event, when, traits):
+
+    unique_id = get_unique_name(event)
+
+    raw_data = schema.RawData(unique_id, when)
+    session.add(raw_data)
     session.commit()
 
     for k, v in traits.iteritems():
-        t = schema.Trait(k, v, d)
+        v, _type = v
+        key_id = get_unique_name(k)
+        value_map = {schema.TEXT_TYPE: 't_string',
+                     schema.FLOAT_TYPE: 't_float',
+                     schema.INT_TYPE: 't_int'}
+        values = {'t_string': None, 't_float': None, 't_int': None}
+        values[value_map[_type]] = v
+        t = schema.Trait(key_id, raw_data, _type, **values)
         session.add(t)
     session.commit()
-    return datetime.datetime.utcnow() - start
 
 
 def create_data():
@@ -103,24 +122,20 @@ def create_data():
 
     for x in range(10000):
         traits = {}
-        for k, values in keys:
-            value = None
-            if not values:
-                value = datetime.datetime.utcnow()
-            else:
-                value = random.choice(values)
-            traits[k] = value
-        print x, save(traits, x)
+        event = random.choice(compute_events)
+        when = datetime.datetime.utcnow()
+        for k, values, _type in keys:
+            value = random.choice(values)
+            traits[k] = (value, _type)
+        print x, save(event, when, traits)
 
 
 def query_data():
     # Find the min and max date ranges.
-    _max, _min = session.query(func.max(schema.Trait.value).label("max_when"), 
-                               func.min(schema.Trait.value).label("min_when")) \
-                        .filter(schema.Trait.key == 'when').all()[0]
+    _max, _min = session.query(func.max(schema.RawData.when).label("max_when"), 
+                               func.min(schema.RawData.when).label("min_when"))\
+                        .all()[0]
 
-    _max = datetime.datetime.strptime(_max, "%Y-%m-%d %H:%M:%S.%f")
-    _min = datetime.datetime.strptime(_min, "%Y-%m-%d %H:%M:%S.%f")
     left = _min + datetime.timedelta(minutes = 2)
     right = _max - datetime.timedelta(minutes = 2)
 
@@ -130,41 +145,41 @@ def query_data():
     # Select all the distinct data ID's within this time range.
     # Note: This query is not run, but rather it's used in sub-selects.
     # This should force all the heavy work to be done on the db.
-    requests = session.query(schema.Trait.rawdata_id)\
-                      .filter(schema.Trait.key == 'when',
-                              schema.Trait.value >= str(left),
-                              schema.Trait.value <= str(right))\
+    requests = session.query(schema.RawData.id)\
+                      .filter(schema.RawData.when >= str(left),
+                              schema.RawData.when <= str(right))\
                       .distinct()
 
     # This is a real query to bring back all the UUID's for data created
     # in that time frame.
-    uuids = session.query(schema.Trait.value)\
-                   .filter(schema.Trait.key == 'instance',
+    uuids = session.query(schema.Trait.t_string)\
+                   .filter(schema.Trait.key_id == all_unique_names['instance'].id,
                            schema.Trait.rawdata_id.in_(requests))\
                    .distinct()
+    _uuids = list(uuids)
+    print "# UUIDS=%d" % len(_uuids)
 
-    uuid = random.choice(list(uuids))[0]
+    uuid = random.choice(_uuids)[0]
     print "UUID:", uuid
 
-    requests2 = session.query(schema.Trait.rawdata_id)\
-                      .filter(schema.Trait.key == 'when',
-                              schema.Trait.value >= str(left),
-                              schema.Trait.value <= str(right))\
-                      .distinct()
-
     uuid_requests = session.query(schema.Trait.rawdata_id)\
-                           .filter(schema.Trait.key == 'instance',
-                                   schema.Trait.value == uuid,
-                                   schema.Trait.rawdata_id.in_(requests2))\
+                           .filter(schema.Trait.key_id == all_unique_names['instance'].id,
+                                   schema.Trait.t_string == uuid,
+                                   schema.Trait.rawdata_id.in_(requests))\
                            .distinct()
 
     all_data = session.query(schema.Trait)\
-                      .filter(schema.Trait.rawdata_id.in_(uuid_requests)).limit(10)
+                      .filter(schema.Trait.rawdata_id.in_(uuid_requests))
 
     for r in all_data.all():
         print "Rawdata: ", r
 
 
 if __name__ == '__main__':
+    #schema.reset_db()
+    for uniquename in session.query(schema.UniqueName).all():
+        all_unique_names[uniquename.key] = uniquename
+    start = datetime.datetime.utcnow()
     #create_data()
     query_data()
+    print datetime.datetime.utcnow() - start
