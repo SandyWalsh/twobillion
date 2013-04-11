@@ -79,7 +79,7 @@ keys = [('deployment', deployments, schema.TEXT_TYPE),
         ('service', services, schema.TEXT_TYPE),
         ('host', hosts, schema.TEXT_TYPE),
         ('instance', ["ins-%s" % uuid.uuid4() for x in range(50)], schema.TEXT_TYPE),
-        ('request_id', [uuid.uuid4() for x in range(50)], schema.TEXT_TYPE)
+        ('request_id', [uuid.uuid4() for x in range(10)], schema.TEXT_TYPE)
        ]
 
 
@@ -162,17 +162,42 @@ def query_data():
     uuid = random.choice(_uuids)[0]
     print "UUID:", uuid
 
-    uuid_requests = session.query(schema.Trait.rawdata_id)\
-                           .filter(schema.Trait.key_id == all_unique_names['instance'].id,
-                                   schema.Trait.t_string == uuid,
-                                   schema.Trait.rawdata_id.in_(requests))\
-                           .distinct()
 
-    all_data = session.query(schema.Trait)\
-                      .filter(schema.Trait.rawdata_id.in_(uuid_requests))
+    all_data = None
+    if False:
+        # Subselect approach ... 2.5 sec
+        uuid_requests = session.query(schema.Trait.rawdata_id)\
+                               .filter(schema.Trait.key_id == all_unique_names['instance'].id,
+                                       schema.Trait.t_string == uuid,
+                                       schema.Trait.rawdata_id.in_(requests))\
+                               .distinct()
 
-    for r in all_data.all():
-        print "Rawdata: ", r
+        all_data = session.query(schema.Trait)\
+                          .filter(schema.Trait.rawdata_id.in_(uuid_requests))\
+                          .group_by(schema.Trait.rawdata_id)
+    else:
+        # Join ... 0.25 sec
+        sub_query = session.query(schema.RawData.id)\
+                        .join(schema.Trait, schema.Trait.rawdata_id == schema.RawData.id)\
+                        .filter(schema.RawData.when >= str(left),
+                                schema.RawData.when <= str(right),
+                                schema.Trait.key_id == 10,
+                                schema.Trait.t_string == 'ins-301fbb11-2669-4be2-8f36-d7dc')\
+                        .subquery()
+
+        all_data = session.query(schema.Trait)\
+                          .join(sub_query, schema.Trait.rawdata_id == sub_query.c.id)\
+                          .order_by(sub_query.c.id)
+
+    print len(list(all_data.all()))
+    return 
+
+    last = None
+    for t in all_data.all():
+        if t.rawdata_id != last:
+            print "----- %s -----" % t.raw_data.unique_name
+            last = t.rawdata_id
+        print t
 
 
 if __name__ == '__main__':

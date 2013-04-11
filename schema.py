@@ -25,7 +25,7 @@ class UniqueName(Base):
         self.key = key
 
     def __repr__(self):
-        return "<UniqueName('%s>" % self.key
+        return "<UniqueName: %s>" % self.key
 
 
 class RawData(Base):
@@ -39,11 +39,11 @@ class RawData(Base):
     unique_name = relationship("UniqueName", backref=backref('unique_name', order_by=id))
 
     def __init__(self, event_id, when):
-        self.eventname_id = event_id
+        self.uniquename_id = event_id
         self.when = when
 
     def __repr__(self):
-        return "<RawData('Event: %s, When: %s')>" % (self.unique_name, self.when)
+        return "<RawData %d('Event: %s, When: %s')>" % (self.id, self.unique_name, self.when)
 
 
 class Trait(Base):
